@@ -307,8 +307,12 @@ if page == "Vue d'ensemble":
 
     # KPIs
     total_ean = len(df)
-    total_elec_kwh = df[df["site_type_energie"] == "Electricité"]["site_consommation_annuelle"].sum()
-    total_gaz_kwh = df[df["site_type_energie"] == "Gaz"]["site_consommation_annuelle"].sum()
+    mask_elec = df["site_type_energie"].str.contains("lectricit", case=False, na=False)
+    mask_gaz = df["site_type_energie"].str.contains("gaz", case=False, na=False)
+    total_elec_kwh = df.loc[mask_elec, "site_consommation_annuelle"].sum()
+    total_gaz_kwh = df.loc[mask_gaz, "site_consommation_annuelle"].sum()
+    nb_elec = int(mask_elec.sum())
+    nb_gaz = int(mask_gaz.sum())
     nb_groupes_actifs = df[df["groupe_actif"]]["groupe_nom"].nunique()
     total_injection = df["site_injection_annuelle"].sum()
 
@@ -316,9 +320,9 @@ if page == "Vue d'ensemble":
     with c1:
         st.markdown(kpi_card("EAN actifs", fmt_number(total_ean), f"{df['societe_nom'].nunique()} sociétés"), unsafe_allow_html=True)
     with c2:
-        st.markdown(kpi_card("Consommation Électricité", fmt_energy(total_elec_kwh, "GWh"), f"{fmt_number(len(df[df['site_type_energie']=='Electricité']))} compteurs", "gold"), unsafe_allow_html=True)
+        st.markdown(kpi_card("Consommation Électricité", fmt_energy(total_elec_kwh, "GWh"), f"{fmt_number(nb_elec)} compteurs", "gold"), unsafe_allow_html=True)
     with c3:
-        st.markdown(kpi_card("Consommation Gaz", fmt_energy(total_gaz_kwh, "GWh"), f"{fmt_number(len(df[df['site_type_energie']=='Gaz']))} compteurs", "blue"), unsafe_allow_html=True)
+        st.markdown(kpi_card("Consommation Gaz", fmt_energy(total_gaz_kwh, "GWh"), f"{fmt_number(nb_gaz)} compteurs", "blue"), unsafe_allow_html=True)
     with c4:
         st.markdown(kpi_card("Groupes actifs", str(nb_groupes_actifs), f"sur {df['groupe_nom'].nunique()} groupes"), unsafe_allow_html=True)
     with c5:
@@ -352,28 +356,42 @@ if page == "Vue d'ensemble":
         lot_stats = lot_stats.sort_values("volume_kwh", ascending=True)
 
         fig_lot = go.Figure()
+        max_vol_gwh = lot_stats["volume_kwh"].max() / 1_000_000
+        # For small bars: show GWh + EAN combined outside; for large bars: GWh inside + EAN annotation
+        bar_texts = []
+        bar_positions = []
+        for v in lot_stats["volume_kwh"]:
+            gwh = v / 1_000_000
+            if gwh < max_vol_gwh * 0.15:
+                bar_texts.append("")  # No text inside small bars
+                bar_positions.append("outside")
+            else:
+                bar_texts.append(f"{gwh:,.1f} GWh")
+                bar_positions.append("auto")
         fig_lot.add_trace(go.Bar(
             y=lot_stats["lot_label"], x=lot_stats["volume_kwh"] / 1_000_000,
             orientation="h", name="Volume (GWh)",
             marker_color="#262E4B",
-            text=[f"{v/1e6:,.1f} GWh" for v in lot_stats["volume_kwh"]],
-            textposition="auto",
+            text=bar_texts,
+            textposition=bar_positions,
         ))
         plotly_defaults(fig_lot, 350)
         fig_lot.update_layout(
             xaxis_title="Volume (GWh)",
             showlegend=False,
         )
-        # Add EAN count annotations – ensure minimum x offset so small bars remain readable
-        max_vol = lot_stats["volume_kwh"].max() / 1_000_000
+        # Add EAN count annotations + GWh for small bars
         for _, row in lot_stats.iterrows():
             vol_gwh = row["volume_kwh"] / 1_000_000
-            # For very small bars, place annotation further right so it doesn't overlap the bar text
-            x_pos = max(vol_gwh, max_vol * 0.08)
+            if vol_gwh < max_vol_gwh * 0.15:
+                # Small bar: show "X.X GWh · 123 EAN" outside the bar
+                label = f"  {vol_gwh:,.1f} GWh · {int(row['nb_ean'])} EAN"
+            else:
+                label = f"  {int(row['nb_ean'])} EAN"
             fig_lot.add_annotation(
-                x=x_pos,
+                x=vol_gwh,
                 y=row["lot_label"],
-                text=f"  {int(row['nb_ean'])} EAN",
+                text=label,
                 showarrow=False,
                 xanchor="left",
                 font=dict(size=11, color="#64748B"),
