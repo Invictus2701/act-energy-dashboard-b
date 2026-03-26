@@ -205,6 +205,15 @@ footer {display: none !important;}
     margin: 0.3rem auto 1rem auto;
     border-radius: 2px;
 }
+
+/* Global filter section */
+.filter-label {
+    color: rgba(255,255,255,0.7);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 0.2rem;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -219,7 +228,6 @@ def kpi_card(title, value, sub="", variant=""):
 
 
 def fmt_energy(kwh, force_unit=None):
-    """Format kWh value to human-readable string with appropriate unit."""
     if pd.isna(kwh) or kwh == 0:
         return "0 kWh"
     if force_unit == "GWh" or (force_unit is None and abs(kwh) >= 1_000_000):
@@ -230,7 +238,6 @@ def fmt_energy(kwh, force_unit=None):
 
 
 def fmt_number(n):
-    """Format integer with thousand separators."""
     if pd.isna(n):
         return "0"
     return f"{int(n):,}"
@@ -259,16 +266,13 @@ def load_data():
     if not os.path.exists(path):
         return None
     df = pd.read_excel(path, dtype={"site_EAN": str})
-    # Fix encoding issues (Excel contains mojibake)
     df["site_type_energie"] = df["site_type_energie"].apply(
         lambda x: "Electricité" if isinstance(x, str) and "lectricit" in x else x
     )
     df["groupe_type"] = df["groupe_type"].apply(
         lambda x: "Privé" if isinstance(x, str) and "Priv" in x else x
     )
-    # Ensure EAN is string with leading zeros
     df["site_EAN"] = df["site_EAN"].astype(str).str.strip()
-    # Fill NaN in text columns
     for col in [
         "site_nom",
         "societe_nom",
@@ -278,7 +282,6 @@ def load_data():
         "site_lot",
     ]:
         df[col] = df[col].fillna("")
-    # Fill NaN in numeric columns
     for col in [
         "site_consommation_annuelle",
         "site_injection_annuelle",
@@ -288,16 +291,14 @@ def load_data():
         "groupe_consommation_totale_gaz",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-    # Ensure bool
     df["groupe_actif"] = df["groupe_actif"].astype(bool)
     return df
 
 
 # ─────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR — NAVIGATION + FILTRES GLOBAUX
 # ─────────────────────────────────────────────
 with st.sidebar:
-    # Logo
     logo_path = os.path.join(os.path.dirname(__file__), "Logo actenergy négatif.png")
     if os.path.exists(logo_path):
         st.image(logo_path, use_container_width=True)
@@ -317,20 +318,51 @@ with st.sidebar:
             "Analyse par Société",
             "Analyse par Lot",
             "Injections & Renouvelable",
+            "Segmentation",
         ],
         label_visibility="collapsed",
     )
 
-# ─────────────────────────────────────────────
-# LOAD DATA
-# ─────────────────────────────────────────────
-df = load_data()
+    # ── Filtres globaux ──
+    st.markdown("---")
+    st.markdown('<p class="filter-label">Filtres globaux</p>', unsafe_allow_html=True)
 
-if df is None:
+    filtre_segment = st.selectbox(
+        "Segment",
+        ["Tous", "Public", "Privé"],
+        key="global_segment",
+    )
+    filtre_energie = st.selectbox(
+        "Énergie",
+        ["Toutes", "Electricité", "Gaz"],
+        key="global_energie",
+    )
+
+# ─────────────────────────────────────────────
+# LOAD DATA + APPLY GLOBAL FILTERS
+# ─────────────────────────────────────────────
+df_raw = load_data()
+
+if df_raw is None:
     st.error(
         f"Fichier '{EXCEL_FILE}' introuvable. Placez le fichier Excel dans le même répertoire que app.py."
     )
     st.stop()
+
+df = df_raw.copy()
+if filtre_segment != "Tous":
+    df = df[df["groupe_type"] == filtre_segment]
+if filtre_energie != "Toutes":
+    df = df[df["site_type_energie"] == filtre_energie]
+
+# Show active filters banner
+active_filters = []
+if filtre_segment != "Tous":
+    active_filters.append(f"Segment : **{filtre_segment}**")
+if filtre_energie != "Toutes":
+    active_filters.append(f"Énergie : **{filtre_energie}**")
+if active_filters:
+    st.info("Filtres actifs : " + " · ".join(active_filters))
 
 
 # ═════════════════════════════════════════════
@@ -445,14 +477,13 @@ if page == "Vue d'ensemble":
         lot_stats = lot_stats.sort_values("volume_kwh", ascending=True)
 
         fig_lot = go.Figure()
-        max_vol_gwh = lot_stats["volume_kwh"].max() / 1_000_000
-        # For small bars: show GWh + EAN combined outside; for large bars: GWh inside + EAN annotation
+        max_vol_gwh = lot_stats["volume_kwh"].max() / 1_000_000 if len(lot_stats) > 0 else 1
         bar_texts = []
         bar_positions = []
         for v in lot_stats["volume_kwh"]:
             gwh = v / 1_000_000
             if gwh < max_vol_gwh * 0.15:
-                bar_texts.append("")  # No text inside small bars
+                bar_texts.append("")
                 bar_positions.append("outside")
             else:
                 bar_texts.append(f"{gwh:,.1f} GWh")
@@ -469,15 +500,10 @@ if page == "Vue d'ensemble":
             )
         )
         plotly_defaults(fig_lot, 350)
-        fig_lot.update_layout(
-            xaxis_title="Volume (GWh)",
-            showlegend=False,
-        )
-        # Add EAN count annotations + GWh for small bars
+        fig_lot.update_layout(xaxis_title="Volume (GWh)", showlegend=False)
         for _, row in lot_stats.iterrows():
             vol_gwh = row["volume_kwh"] / 1_000_000
             if vol_gwh < max_vol_gwh * 0.15:
-                # Small bar: show "X.X GWh · 123 EAN" outside the bar
                 label = f"  {vol_gwh:,.1f} GWh · {int(row['nb_ean'])} EAN"
             else:
                 label = f"  {int(row['nb_ean'])} EAN"
@@ -547,6 +573,148 @@ if page == "Vue d'ensemble":
         plotly_defaults(fig_top10, 420)
         fig_top10.update_layout(barmode="stack", xaxis_title="Consommation (GWh)")
         st.plotly_chart(fig_top10, use_container_width=True)
+
+    # ── NOUVEAUX GRAPHIQUES ──
+
+    # Row 3: Type de compteur + Heatmap Énergie × Relevé
+    col_left3, col_right3 = st.columns(2)
+
+    with col_left3:
+        section_title("Type de compteur")
+        compteur_split = df.groupby("site_type_compteur")["site_EAN"].count().reset_index()
+        compteur_split.columns = ["Type", "Nb EAN"]
+        compteur_split = compteur_split[compteur_split["Type"] != ""]
+        if len(compteur_split) > 0:
+            fig_compteur = px.pie(
+                compteur_split,
+                values="Nb EAN",
+                names="Type",
+                hole=0.55,
+                color_discrete_sequence=ACT_SEQUENCE,
+            )
+            fig_compteur.update_traces(textinfo="percent+label", textfont_size=12)
+            plotly_defaults(fig_compteur, 380)
+            fig_compteur.update_layout(showlegend=False)
+            st.plotly_chart(fig_compteur, use_container_width=True)
+        else:
+            st.info("Aucune donnée de type de compteur disponible.")
+
+    with col_right3:
+        section_title("Énergie × Relevé — matrice")
+        heatmap_data = df[df["site_type_releve"] != ""].groupby(
+            ["site_type_energie", "site_type_releve"]
+        )["site_EAN"].count().reset_index()
+        heatmap_data.columns = ["Énergie", "Relevé", "Nb EAN"]
+        if len(heatmap_data) > 0:
+            heatmap_pivot = heatmap_data.pivot(index="Énergie", columns="Relevé", values="Nb EAN").fillna(0)
+            releve_order = [r for r in ["AMR", "MMR", "YMR", "SMR"] if r in heatmap_pivot.columns]
+            heatmap_pivot = heatmap_pivot[releve_order]
+            releve_labels_display = [RELEVE_LABELS.get(r, r) for r in releve_order]
+
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=heatmap_pivot.values,
+                x=releve_labels_display,
+                y=heatmap_pivot.index.tolist(),
+                colorscale=[[0, "#F5F7FA"], [0.5, "#86B9B7"], [1, "#262E4B"]],
+                text=heatmap_pivot.values.astype(int),
+                texttemplate="%{text:,}",
+                textfont=dict(size=14),
+                hoverongaps=False,
+            ))
+            plotly_defaults(fig_heat, 380)
+            fig_heat.update_layout(
+                xaxis_title="Type de relevé",
+                yaxis_title="",
+                yaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.info("Aucune donnée de relevé disponible.")
+
+    # Row 4: Distribution EAN par société + Distribution consommation (log)
+    col_left4, col_right4 = st.columns(2)
+
+    with col_left4:
+        section_title("Distribution EAN par société")
+        ean_par_soc = df.groupby("societe_nom")["site_EAN"].count().reset_index()
+        ean_par_soc.columns = ["Société", "Nb EAN"]
+        fig_hist_ean = px.histogram(
+            ean_par_soc,
+            x="Nb EAN",
+            nbins=40,
+            color_discrete_sequence=["#262E4B"],
+            labels={"Nb EAN": "Nombre d'EAN par société", "count": "Nombre de sociétés"},
+        )
+        plotly_defaults(fig_hist_ean, 380)
+        fig_hist_ean.update_layout(
+            xaxis_title="Nombre d'EAN par société",
+            yaxis_title="Nombre de sociétés",
+            bargap=0.05,
+        )
+        st.plotly_chart(fig_hist_ean, use_container_width=True)
+
+    with col_right4:
+        section_title("Distribution consommation annuelle (échelle log)")
+        conso_pos = df[df["site_consommation_annuelle"] > 0]["site_consommation_annuelle"].copy()
+        if len(conso_pos) > 0:
+            fig_hist_conso = px.histogram(
+                x=np.log10(conso_pos),
+                nbins=50,
+                color_discrete_sequence=["#86B9B7"],
+                labels={"x": "log₁₀(kWh)", "count": "Nombre de sites"},
+            )
+            plotly_defaults(fig_hist_conso, 380)
+            fig_hist_conso.update_layout(
+                xaxis_title="log₁₀ Consommation annuelle (kWh)",
+                yaxis_title="Nombre de sites",
+                bargap=0.05,
+            )
+            st.plotly_chart(fig_hist_conso, use_container_width=True)
+
+    # Row 5: Top 20 sociétés
+    col_left5, col_right5 = st.columns(2)
+
+    with col_left5:
+        section_title("Top 20 sociétés par nombre d'EAN")
+        top20_ean = (
+            df.groupby("societe_nom")["site_EAN"].count()
+            .reset_index()
+            .rename(columns={"site_EAN": "Nb EAN", "societe_nom": "Société"})
+            .nlargest(20, "Nb EAN")
+            .sort_values("Nb EAN", ascending=True)
+        )
+        fig_top20_ean = px.bar(
+            top20_ean,
+            y="Société",
+            x="Nb EAN",
+            orientation="h",
+            color_discrete_sequence=["#262E4B"],
+            text="Nb EAN",
+        )
+        plotly_defaults(fig_top20_ean, 520)
+        fig_top20_ean.update_layout(xaxis_title="Nombre d'EAN", showlegend=False)
+        st.plotly_chart(fig_top20_ean, use_container_width=True)
+
+    with col_right5:
+        section_title("Top 20 sociétés par consommation")
+        top20_conso = (
+            df.groupby("societe_nom")["site_consommation_annuelle"].sum()
+            .reset_index()
+            .rename(columns={"site_consommation_annuelle": "Conso MWh", "societe_nom": "Société"})
+        )
+        top20_conso["Conso MWh"] = top20_conso["Conso MWh"] / 1000
+        top20_conso = top20_conso.nlargest(20, "Conso MWh").sort_values("Conso MWh", ascending=True)
+        fig_top20_conso = px.bar(
+            top20_conso,
+            y="Société",
+            x="Conso MWh",
+            orientation="h",
+            color_discrete_sequence=["#D3A021"],
+            text=top20_conso["Conso MWh"].apply(lambda x: f"{x:,.0f}"),
+        )
+        plotly_defaults(fig_top20_conso, 520)
+        fig_top20_conso.update_layout(xaxis_title="Consommation (MWh)", showlegend=False)
+        st.plotly_chart(fig_top20_conso, use_container_width=True)
 
 
 # ═════════════════════════════════════════════
@@ -676,6 +844,30 @@ elif page == "Analyse par Groupe":
             st.plotly_chart(fig_lot_grp, use_container_width=True)
         else:
             st.info("Aucune consommation enregistrée pour ce groupe.")
+
+    # ── Profil de relevé par groupe ──
+    section_title("Profil de relevé par groupe")
+    releve_grp = (
+        gdf[gdf["site_type_releve"] != ""]
+        .groupby(["groupe_nom", "site_type_releve"])["site_EAN"]
+        .count()
+        .reset_index()
+    )
+    releve_grp.columns = ["Groupe", "Relevé", "Nb EAN"]
+    releve_grp["Relevé label"] = releve_grp["Relevé"].map(RELEVE_LABELS).fillna(releve_grp["Relevé"])
+    if len(releve_grp) > 0:
+        fig_releve_grp = px.bar(
+            releve_grp,
+            x="Groupe",
+            y="Nb EAN",
+            color="Relevé label",
+            barmode="stack",
+            color_discrete_sequence=ACT_SEQUENCE,
+            labels={"Relevé label": "Type de relevé"},
+        )
+        plotly_defaults(fig_releve_grp, 400)
+        fig_releve_grp.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig_releve_grp, use_container_width=True)
 
     # Injection bar
     total_conso_grp = conso_elec + conso_gaz
@@ -1183,4 +1375,179 @@ elif page == "Injections & Renouvelable":
         use_container_width=True,
         hide_index=True,
         height=400,
+    )
+
+
+# ═════════════════════════════════════════════
+# PAGE 6 — SEGMENTATION
+# ═════════════════════════════════════════════
+elif page == "Segmentation":
+    st.title("Segmentation Public / Privé")
+    st.markdown(
+        '<p class="page-subtitle">Analyses croisées par segment (Public / Privé) et variables du portefeuille</p>',
+        unsafe_allow_html=True,
+    )
+
+    # KPIs par segment
+    seg_stats = (
+        df.groupby("groupe_type")
+        .agg(
+            nb_ean=("site_EAN", "count"),
+            conso=("site_consommation_annuelle", "sum"),
+            nb_groupes=("groupe_nom", "nunique"),
+            nb_societes=("societe_nom", "nunique"),
+        )
+        .reset_index()
+    )
+    cols_kpi = st.columns(len(seg_stats) if len(seg_stats) > 0 else 1)
+    for i, (_, row) in enumerate(seg_stats.iterrows()):
+        with cols_kpi[i % len(cols_kpi)]:
+            variant = "green" if row["groupe_type"] == "Public" else "gold"
+            st.markdown(
+                kpi_card(
+                    row["groupe_type"],
+                    fmt_number(row["nb_ean"]) + " EAN",
+                    f"{fmt_energy(row['conso'])} · {int(row['nb_groupes'])} groupes · {int(row['nb_societes'])} sociétés",
+                    variant,
+                ),
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("")
+
+    # Row 1: EAN par segment × vecteur + Consommation par segment × vecteur
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        section_title("EAN par segment et vecteur énergétique")
+        seg_energie = (
+            df.groupby(["groupe_type", "site_type_energie"])["site_EAN"]
+            .count()
+            .reset_index()
+        )
+        seg_energie.columns = ["Segment", "Énergie", "Nb EAN"]
+        if len(seg_energie) > 0:
+            fig_seg_ean = px.bar(
+                seg_energie,
+                x="Segment",
+                y="Nb EAN",
+                color="Énergie",
+                barmode="group",
+                color_discrete_map={"Electricité": "#D3A021", "Gaz": "#86B9B7"},
+                text="Nb EAN",
+            )
+            fig_seg_ean.update_traces(texttemplate="%{text:,}", textposition="outside")
+            plotly_defaults(fig_seg_ean, 400)
+            st.plotly_chart(fig_seg_ean, use_container_width=True)
+
+    with col_right:
+        section_title("Consommation par segment et vecteur")
+        seg_conso = (
+            df.groupby(["groupe_type", "site_type_energie"])["site_consommation_annuelle"]
+            .sum()
+            .reset_index()
+        )
+        seg_conso.columns = ["Segment", "Énergie", "Conso kWh"]
+        seg_conso["Conso GWh"] = seg_conso["Conso kWh"] / 1e6
+        if len(seg_conso) > 0:
+            fig_seg_conso = px.bar(
+                seg_conso,
+                x="Segment",
+                y="Conso GWh",
+                color="Énergie",
+                barmode="group",
+                color_discrete_map={"Electricité": "#D3A021", "Gaz": "#86B9B7"},
+                text=seg_conso["Conso GWh"].apply(lambda x: f"{x:,.1f}"),
+            )
+            fig_seg_conso.update_traces(textposition="outside")
+            plotly_defaults(fig_seg_conso, 400)
+            fig_seg_conso.update_layout(yaxis_title="Consommation (GWh)")
+            st.plotly_chart(fig_seg_conso, use_container_width=True)
+
+    # Row 2: Type de relevé par segment + Lot tarifaire par segment
+    col_left2, col_right2 = st.columns(2)
+
+    with col_left2:
+        section_title("Type de relevé par segment")
+        seg_releve = (
+            df[df["site_type_releve"] != ""]
+            .groupby(["groupe_type", "site_type_releve"])["site_EAN"]
+            .count()
+            .reset_index()
+        )
+        seg_releve.columns = ["Segment", "Relevé", "Nb EAN"]
+        seg_releve["Relevé label"] = seg_releve["Relevé"].map(RELEVE_LABELS).fillna(seg_releve["Relevé"])
+        if len(seg_releve) > 0:
+            fig_seg_releve = px.bar(
+                seg_releve,
+                x="Segment",
+                y="Nb EAN",
+                color="Relevé label",
+                barmode="stack",
+                color_discrete_sequence=ACT_SEQUENCE,
+                labels={"Relevé label": "Type de relevé"},
+                text="Nb EAN",
+            )
+            fig_seg_releve.update_traces(texttemplate="%{text:,}", textposition="inside")
+            plotly_defaults(fig_seg_releve, 400)
+            st.plotly_chart(fig_seg_releve, use_container_width=True)
+
+    with col_right2:
+        section_title("Lot tarifaire par segment")
+        seg_lot = (
+            df.groupby(["groupe_type", "site_lot"])["site_EAN"]
+            .count()
+            .reset_index()
+        )
+        seg_lot.columns = ["Segment", "Lot", "Nb EAN"]
+        seg_lot["Lot label"] = seg_lot["Lot"].map(LOT_LABELS).fillna(seg_lot["Lot"])
+        if len(seg_lot) > 0:
+            fig_seg_lot = px.bar(
+                seg_lot,
+                x="Segment",
+                y="Nb EAN",
+                color="Lot label",
+                barmode="stack",
+                color_discrete_sequence=ACT_SEQUENCE,
+                labels={"Lot label": "Lot"},
+                text="Nb EAN",
+            )
+            fig_seg_lot.update_traces(texttemplate="%{text:,}", textposition="inside")
+            plotly_defaults(fig_seg_lot, 400)
+            st.plotly_chart(fig_seg_lot, use_container_width=True)
+
+    # Row 3: Tableau récapitulatif croisé
+    section_title("Tableau récapitulatif par segment")
+    seg_detail = (
+        df.groupby(["groupe_type", "site_type_energie"])
+        .agg(
+            nb_ean=("site_EAN", "count"),
+            conso_kwh=("site_consommation_annuelle", "sum"),
+            nb_societes=("societe_nom", "nunique"),
+            nb_groupes=("groupe_nom", "nunique"),
+            conso_moyenne=("site_consommation_annuelle", "mean"),
+        )
+        .reset_index()
+    )
+    seg_detail["conso_mwh"] = seg_detail["conso_kwh"] / 1000
+    st.dataframe(
+        seg_detail[
+            ["groupe_type", "site_type_energie", "nb_ean", "conso_mwh", "conso_moyenne", "nb_societes", "nb_groupes"]
+        ].rename(
+            columns={
+                "groupe_type": "Segment",
+                "site_type_energie": "Énergie",
+                "nb_ean": "Nb EAN",
+                "conso_mwh": "Conso (MWh)",
+                "conso_moyenne": "Conso moyenne (kWh)",
+                "nb_societes": "Sociétés",
+                "nb_groupes": "Groupes",
+            }
+        ),
+        column_config={
+            "Conso (MWh)": st.column_config.NumberColumn(format="%,.0f"),
+            "Conso moyenne (kWh)": st.column_config.NumberColumn(format="%,.0f"),
+        },
+        use_container_width=True,
+        hide_index=True,
     )
