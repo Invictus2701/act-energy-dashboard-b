@@ -992,26 +992,41 @@ elif page == "Analyse par Lot":
 
     with col_left:
         section_title("Distribution des consommations")
-        conso_nonzero = ldf[ldf["site_consommation_annuelle"] > 0][
-            "site_consommation_annuelle"
-        ]
+        conso_nonzero = ldf[ldf["site_consommation_annuelle"] > 0].copy()
         if len(conso_nonzero) > 0:
-            fig_hist = px.histogram(
-                conso_nonzero,
-                nbins=50,
-                color_discrete_sequence=["#262E4B"],
-                labels={
-                    "value": "Consommation annuelle (kWh)",
-                    "count": "Nombre d'EAN",
-                },
-            )
-            plotly_defaults(fig_hist, 380)
-            fig_hist.update_layout(
-                xaxis_title="Consommation annuelle (kWh)",
-                yaxis_title="Nombre d'EAN",
+            lots_uniques = sorted(conso_nonzero["site_lot"].unique())
+            if len(lots_uniques) > 1:
+                fig_box = px.box(
+                    conso_nonzero,
+                    x="site_lot",
+                    y="site_consommation_annuelle",
+                    color="site_lot",
+                    color_discrete_map={
+                        lot: ACT_SEQUENCE[i % len(ACT_SEQUENCE)]
+                        for i, lot in enumerate(sorted(df["site_lot"].unique()))
+                    },
+                    labels={
+                        "site_consommation_annuelle": "Consommation annuelle (kWh)",
+                        "site_lot": "Lot",
+                    },
+                    points="outliers",
+                )
+            else:
+                fig_box = px.box(
+                    conso_nonzero,
+                    y="site_consommation_annuelle",
+                    color_discrete_sequence=["#262E4B"],
+                    labels={
+                        "site_consommation_annuelle": "Consommation annuelle (kWh)",
+                    },
+                    points="outliers",
+                )
+            plotly_defaults(fig_box, 380)
+            fig_box.update_layout(
+                yaxis_title="Consommation annuelle (kWh)",
                 showlegend=False,
             )
-            st.plotly_chart(fig_hist, use_container_width=True)
+            st.plotly_chart(fig_box, use_container_width=True)
         else:
             st.info("Aucune consommation > 0 dans cette sélection.")
 
