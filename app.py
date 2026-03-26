@@ -16,7 +16,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-EXCEL_FILE = "MyAct_Final.xlsx"
+EXCEL_FILE = "data.xlsx"
 
 ACT_COLORS = {
     "primary": "#262E4B",
