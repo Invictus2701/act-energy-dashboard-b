@@ -237,6 +237,17 @@ def fmt_energy(kwh, force_unit=None):
     return f"{kwh:,.0f} kWh"
 
 
+def fmt_eur(val, force_unit=None):
+    """Format euro amounts with M€ / k€ / € auto-scaling."""
+    if pd.isna(val) or val == 0:
+        return "0 €"
+    if force_unit == "M€" or (force_unit is None and abs(val) >= 1_000_000):
+        return f"{val / 1_000_000:,.1f} M€"
+    if force_unit == "k€" or (force_unit is None and abs(val) >= 1_000):
+        return f"{val / 1_000:,.1f} k€"
+    return f"{val:,.0f} €"
+
+
 def fmt_number(n):
     if pd.isna(n):
         return "0"
@@ -289,6 +300,7 @@ def load_data():
         "societe_consommation_totale_gaz",
         "groupe_consommation_totale_electricite",
         "groupe_consommation_totale_gaz",
+        "site_budget_estime_eur",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     df["groupe_actif"] = df["groupe_actif"].astype(bool)
@@ -319,6 +331,7 @@ with st.sidebar:
             "Analyse par Lot",
             "Injections & Renouvelable",
             "Segmentation",
+            "Budget Executive",
         ],
         label_visibility="collapsed",
     )
@@ -1567,3 +1580,406 @@ elif page == "Segmentation":
         use_container_width=True,
         hide_index=True,
     )
+
+# ─────────────────────────────────────────────
+# PAGE 7: BUDGET EXECUTIVE
+# ─────────────────────────────────────────────
+elif page == "Budget Executive":
+    st.title("Budget Executive")
+    st.markdown(
+        '<p class="page-subtitle">Analyse financière du portefeuille — gisements d\'économies et priorisation</p>',
+        unsafe_allow_html=True,
+    )
+
+    budget_col = "site_budget_estime_eur"
+
+    # ── KPIs stratégiques ──
+    budget_total = df[budget_col].sum()
+    budget_moy = df[budget_col].mean()
+    budget_med = df[budget_col].median()
+    nb_sites_total = len(df)
+
+    # Pareto: sites pour 80% du budget
+    df_pareto = df.sort_values(budget_col, ascending=False).copy()
+    df_pareto["budget_cumsum"] = df_pareto[budget_col].cumsum()
+    seuil_80 = budget_total * 0.80
+    nb_sites_80 = int((df_pareto["budget_cumsum"] <= seuil_80).sum()) + 1
+    pct_sites_80 = nb_sites_80 / nb_sites_total * 100
+
+    # Poids du lot HT
+    budget_ht = df[df["site_lot"] == "HT"][budget_col].sum()
+    pct_ht = budget_ht / budget_total * 100 if budget_total > 0 else 0
+
+    # Mix élec / gaz
+    budget_elec = df[df["site_type_energie"] == "Electricité"][budget_col].sum()
+    budget_gaz = df[df["site_type_energie"] == "Gaz"][budget_col].sum()
+    pct_elec = budget_elec / budget_total * 100 if budget_total > 0 else 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(
+            kpi_card("Budget Total", fmt_eur(budget_total), f"{fmt_number(nb_sites_total)} sites", "gold"),
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            kpi_card("Pareto 80%", f"{nb_sites_80:,} sites", f"{pct_sites_80:.1f}% du portefeuille"),
+            unsafe_allow_html=True,
+        )
+    with c3:
+        st.markdown(
+            kpi_card("Coût moyen / EAN", fmt_eur(budget_moy), f"médiane : {fmt_eur(budget_med)}"),
+            unsafe_allow_html=True,
+        )
+    with c4:
+        st.markdown(
+            kpi_card("Mix Élec", f"{pct_elec:.0f}%", f"{fmt_eur(budget_elec)} / {fmt_eur(budget_gaz)} gaz", "gold"),
+            unsafe_allow_html=True,
+        )
+    with c5:
+        st.markdown(
+            kpi_card("Poids Lot HT", f"{pct_ht:.0f}%", fmt_eur(budget_ht), "blue"),
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("")
+
+    # ── Row 1: Treemap + Donut par lot ──
+    col_tree, col_donut = st.columns([3, 2])
+
+    with col_tree:
+        section_title("Répartition budgétaire — Treemap Groupe → Société")
+        tree_data = (
+            df[df[budget_col] > 0]
+            .groupby(["groupe_nom", "societe_nom"])[budget_col]
+            .sum()
+            .reset_index()
+        )
+        tree_data.columns = ["Groupe", "Société", "Budget"]
+        if len(tree_data) > 0:
+            fig_tree = px.treemap(
+                tree_data,
+                path=["Groupe", "Société"],
+                values="Budget",
+                color="Budget",
+                color_continuous_scale=["#86B9B7", "#D3A021", "#E74C3C"],
+            )
+            fig_tree.update_traces(
+                textinfo="label+value",
+                texttemplate="<b>%{label}</b><br>%{value:,.0f} €",
+                hovertemplate="<b>%{label}</b><br>Budget: %{value:,.0f} €<extra></extra>",
+            )
+            plotly_defaults(fig_tree, 480)
+            fig_tree.update_layout(margin=dict(l=5, r=5, t=30, b=5), coloraxis_showscale=False)
+            st.plotly_chart(fig_tree, use_container_width=True)
+
+    with col_donut:
+        section_title("Répartition par lot")
+        lot_budget = df.groupby("site_lot")[budget_col].sum().reset_index()
+        lot_budget.columns = ["Lot", "Budget"]
+        lot_budget["Label"] = lot_budget["Lot"].map(LOT_LABELS).fillna(lot_budget["Lot"])
+        lot_budget["Pct"] = lot_budget["Budget"] / lot_budget["Budget"].sum() * 100
+        if len(lot_budget) > 0 and lot_budget["Budget"].sum() > 0:
+            fig_donut = px.pie(
+                lot_budget,
+                values="Budget",
+                names="Label",
+                hole=0.5,
+                color_discrete_sequence=ACT_SEQUENCE,
+            )
+            fig_donut.update_traces(
+                textinfo="percent+label",
+                textfont_size=11,
+                hovertemplate="<b>%{label}</b><br>%{value:,.0f} €<br>%{percent}<extra></extra>",
+            )
+            plotly_defaults(fig_donut, 480)
+            fig_donut.update_layout(showlegend=False)
+            st.plotly_chart(fig_donut, use_container_width=True)
+
+    # ── Row 2: Top 20 Groupes + Courbe Pareto ──
+    col_top, col_pareto = st.columns(2)
+
+    with col_top:
+        section_title("Top 20 Groupes par budget")
+        grp_elec = (
+            df[df["site_type_energie"] == "Electricité"]
+            .groupby("groupe_nom")[budget_col]
+            .sum()
+            .rename("budget_elec")
+        )
+        grp_gaz = (
+            df[df["site_type_energie"] == "Gaz"]
+            .groupby("groupe_nom")[budget_col]
+            .sum()
+            .rename("budget_gaz")
+        )
+        grp_budget = pd.concat([grp_elec, grp_gaz], axis=1).fillna(0)
+        grp_budget["budget"] = grp_budget["budget_elec"] + grp_budget["budget_gaz"]
+        grp_budget = grp_budget.nlargest(20, "budget").sort_values("budget", ascending=True)
+
+        fig_top = go.Figure()
+        fig_top.add_trace(
+            go.Bar(
+                y=grp_budget.index,
+                x=grp_budget["budget_elec"],
+                name="Électricité",
+                orientation="h",
+                marker_color="#D3A021",
+            )
+        )
+        fig_top.add_trace(
+            go.Bar(
+                y=grp_budget.index,
+                x=grp_budget["budget_gaz"],
+                name="Gaz",
+                orientation="h",
+                marker_color="#86B9B7",
+            )
+        )
+        plotly_defaults(fig_top, 550)
+        fig_top.update_layout(
+            barmode="stack",
+            yaxis_title="",
+            xaxis_title="Budget estimé (€)",
+            xaxis_tickformat=",",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_top, use_container_width=True)
+
+    with col_pareto:
+        section_title("Courbe de Pareto — Concentration du budget")
+        df_sorted = df.sort_values(budget_col, ascending=False).reset_index(drop=True)
+        df_sorted["rank"] = np.arange(1, len(df_sorted) + 1)
+        df_sorted["pct_sites"] = df_sorted["rank"] / len(df_sorted) * 100
+        df_sorted["budget_cum_pct"] = df_sorted[budget_col].cumsum() / budget_total * 100
+
+        fig_pareto = go.Figure()
+        fig_pareto.add_trace(
+            go.Scatter(
+                x=df_sorted["pct_sites"],
+                y=df_sorted["budget_cum_pct"],
+                mode="lines",
+                line=dict(color="#262E4B", width=2.5),
+                name="% cumulé budget",
+                fill="tozeroy",
+                fillcolor="rgba(38,46,75,0.08)",
+            )
+        )
+        fig_pareto.add_hline(
+            y=80,
+            line_dash="dash",
+            line_color="#E74C3C",
+            annotation_text=f"80% = {nb_sites_80:,} sites ({pct_sites_80:.1f}%)",
+            annotation_position="top right",
+            annotation_font_color="#E74C3C",
+        )
+        nb_sites_50 = int((df_sorted[budget_col].cumsum() <= budget_total * 0.50).sum()) + 1
+        fig_pareto.add_hline(
+            y=50,
+            line_dash="dot",
+            line_color="#D3A021",
+            annotation_text=f"50% = {nb_sites_50:,} sites ({nb_sites_50 / nb_sites_total * 100:.1f}%)",
+            annotation_position="top right",
+            annotation_font_color="#D3A021",
+        )
+        plotly_defaults(fig_pareto, 550)
+        fig_pareto.update_layout(
+            xaxis_title="% des sites (triés par budget décroissant)",
+            yaxis_title="% cumulé du budget total",
+            xaxis=dict(range=[0, 100], showgrid=True, gridcolor="#E2E8F0"),
+            yaxis=dict(range=[0, 105], showgrid=True, gridcolor="#E2E8F0"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_pareto, use_container_width=True)
+
+    # ── Row 3: Scatter Budget vs Nb EAN + Histogramme distribution ──
+    col_scatter, col_histo = st.columns(2)
+
+    with col_scatter:
+        section_title("Budget vs Nb EAN par groupe")
+        grp_scatter = (
+            df.groupby(["groupe_nom", "groupe_type"])
+            .agg(nb_ean=("site_EAN", "count"), budget=(budget_col, "sum"))
+            .reset_index()
+        )
+        grp_scatter["budget_moy_ean"] = grp_scatter["budget"] / grp_scatter["nb_ean"]
+        fig_scatter = px.scatter(
+            grp_scatter,
+            x="nb_ean",
+            y="budget",
+            size="budget",
+            color="groupe_type",
+            hover_name="groupe_nom",
+            color_discrete_map={"Public": "#262E4B", "Privé": "#D3A021"},
+            labels={"nb_ean": "Nombre d'EAN", "budget": "Budget (€)", "groupe_type": "Segment"},
+            size_max=50,
+        )
+        plotly_defaults(fig_scatter, 450)
+        fig_scatter.update_layout(
+            xaxis=dict(showgrid=True, gridcolor="#E2E8F0"),
+            yaxis_tickformat=",",
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+    with col_histo:
+        section_title("Distribution des budgets par site")
+        df_nonzero = df[df[budget_col] > 0].copy()
+        df_nonzero["log_budget"] = np.log10(df_nonzero[budget_col])
+        fig_histo = px.histogram(
+            df_nonzero,
+            x="log_budget",
+            nbins=50,
+            color_discrete_sequence=["#262E4B"],
+            labels={"log_budget": "Budget (€, échelle log₁₀)"},
+        )
+        tickvals = [1, 2, 3, 4, 5, 6]
+        ticktext = ["10 €", "100 €", "1 k€", "10 k€", "100 k€", "1 M€"]
+        plotly_defaults(fig_histo, 450)
+        fig_histo.update_layout(
+            xaxis=dict(tickvals=tickvals, ticktext=ticktext, showgrid=True, gridcolor="#E2E8F0"),
+            yaxis_title="Nombre de sites",
+            showlegend=False,
+        )
+        med_log = np.log10(budget_med) if budget_med > 0 else 0
+        fig_histo.add_vline(
+            x=med_log,
+            line_dash="dash",
+            line_color="#D3A021",
+            annotation_text=f"Médiane: {fmt_eur(budget_med)}",
+            annotation_position="top right",
+            annotation_font_color="#D3A021",
+        )
+        st.plotly_chart(fig_histo, use_container_width=True)
+
+    # ── Row 4: Scoring ABC — Top Spenders ──
+    section_title("Analyse Top-Spenders — Scoring ABC")
+
+    st.markdown(
+        """<div style="background:#F5F7FA;border-radius:8px;padding:12px 18px;margin-bottom:16px;border-left:4px solid #D3A021;font-size:0.9rem;">
+        <b>Classe A</b> = sites concentrant 80% du budget &nbsp;|&nbsp;
+        <b>Classe B</b> = sites entre 80% et 95% &nbsp;|&nbsp;
+        <b>Classe C</b> = les 5% restants
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+    df_abc = df.sort_values(budget_col, ascending=False).reset_index(drop=True).copy()
+    df_abc["budget_cum"] = df_abc[budget_col].cumsum()
+    df_abc["budget_cum_pct"] = df_abc["budget_cum"] / budget_total * 100
+
+    def assign_abc(pct):
+        if pct <= 80:
+            return "A"
+        elif pct <= 95:
+            return "B"
+        else:
+            return "C"
+
+    df_abc["classe"] = df_abc["budget_cum_pct"].apply(assign_abc)
+
+    abc_summary = (
+        df_abc.groupby("classe")
+        .agg(
+            nb_sites=("site_EAN", "count"),
+            budget=(budget_col, "sum"),
+            budget_moy=(budget_col, "mean"),
+        )
+        .reindex(["A", "B", "C"])
+    )
+    abc_summary["pct_sites"] = abc_summary["nb_sites"] / nb_sites_total * 100
+    abc_summary["pct_budget"] = abc_summary["budget"] / budget_total * 100
+
+    col_abc_kpi = st.columns(3)
+    abc_colors = {"A": "gold", "B": "blue", "C": ""}
+    for i, cls in enumerate(["A", "B", "C"]):
+        if cls in abc_summary.index:
+            row = abc_summary.loc[cls]
+            with col_abc_kpi[i]:
+                st.markdown(
+                    kpi_card(
+                        f"Classe {cls}",
+                        f"{int(row['nb_sites']):,} sites",
+                        f"{row['pct_budget']:.0f}% du budget · moy. {fmt_eur(row['budget_moy'])}/site",
+                        abc_colors[cls],
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("")
+
+    col_table, col_grp = st.columns([3, 2])
+
+    with col_table:
+        section_title("Top 20 Sites — Classe A")
+        top20_sites = df_abc[df_abc["classe"] == "A"].head(20)[
+            ["site_EAN", "site_nom", budget_col, "site_lot", "site_type_releve", "groupe_nom", "societe_nom"]
+        ].copy()
+        top20_sites.columns = ["EAN", "Site", "Budget (€)", "Lot", "Relevé", "Groupe", "Société"]
+        st.dataframe(
+            top20_sites,
+            column_config={
+                "Budget (€)": st.column_config.NumberColumn(format="€ %,.0f"),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with col_grp:
+        section_title("Groupes avec le plus de sites A")
+        grp_a = (
+            df_abc[df_abc["classe"] == "A"]
+            .groupby("groupe_nom")
+            .agg(
+                nb_sites_a=("site_EAN", "count"),
+                budget_a=(budget_col, "sum"),
+            )
+            .nlargest(15, "budget_a")
+            .sort_values("budget_a", ascending=True)
+        )
+        fig_grp_a = go.Figure()
+        fig_grp_a.add_trace(
+            go.Bar(
+                y=grp_a.index,
+                x=grp_a["budget_a"],
+                orientation="h",
+                marker_color="#D3A021",
+                text=grp_a["nb_sites_a"].apply(lambda n: f"{n} sites"),
+                textposition="inside",
+                textfont=dict(color="white", size=11),
+            )
+        )
+        plotly_defaults(fig_grp_a, 450)
+        fig_grp_a.update_layout(
+            yaxis_title="",
+            xaxis_title="Budget Classe A (€)",
+            xaxis_tickformat=",",
+            showlegend=False,
+        )
+        st.plotly_chart(fig_grp_a, use_container_width=True)
+
+    # Quick-Win: sites A en YMR
+    section_title("Quick-Wins — Sites A en relevé annuel (YMR)")
+    st.markdown(
+        """<div style="background:#F5F7FA;border-radius:8px;padding:12px 18px;margin-bottom:16px;border-left:4px solid #A4D65E;font-size:0.9rem;">
+        Sites à fort budget qui ne disposent que d'un relevé annuel (YMR). Migrer vers un relevé mensuel (MMR)
+        ou automatique (AMR) donnerait immédiatement de la visibilité pour optimiser la consommation.
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    quick_wins = df_abc[
+        (df_abc["classe"] == "A") & (df_abc["site_type_releve"] == "YMR")
+    ][["site_EAN", "site_nom", budget_col, "site_lot", "groupe_nom", "societe_nom"]].copy()
+    quick_wins.columns = ["EAN", "Site", "Budget (€)", "Lot", "Groupe", "Société"]
+    if len(quick_wins) > 0:
+        st.dataframe(
+            quick_wins.sort_values("Budget (€)", ascending=False).head(30),
+            column_config={
+                "Budget (€)": st.column_config.NumberColumn(format="€ %,.0f"),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+        qw_total = quick_wins["Budget (€)"].sum()
+        st.caption(f"{len(quick_wins)} sites Classe A en YMR — budget total : {fmt_eur(qw_total)}")
+    else:
+        st.success("Aucun site Classe A n'est en relevé annuel — bonne couverture de données.")
